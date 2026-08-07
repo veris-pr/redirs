@@ -1,4 +1,5 @@
 use std::fmt;
+use std::num;
 use std::string::FromUtf8Error;
 
 #[derive(Debug, PartialEq)]
@@ -7,6 +8,8 @@ pub enum RESPError {
     OutOfBounds(usize),
     WrongType,
     Unknown,
+    IncorrectLength(RESPLength),
+    ParseInt,
 }
 
 impl fmt::Display for RESPError {
@@ -16,6 +19,8 @@ impl fmt::Display for RESPError {
             RESPError::OutOfBounds(index) => write!(f, "Index {} is out of bounds", index),
             RESPError::WrongType => write!(f, "Unexpected type byte"),
             RESPError::Unknown => write!(f, "Unknown format for RESP string"),
+            RESPError::IncorrectLength(length) => write!(f, "Incorrect length {}", length),
+            RESPError::ParseInt => write!(f, "Cannot parse string into integer"),
         }
     }
 }
@@ -26,4 +31,12 @@ impl From<FromUtf8Error> for RESPError {
     }
 }
 
+impl From<num::ParseIntError> for RESPError {
+    fn from(_: num::ParseIntError) -> Self {
+        RESPError::ParseInt
+    }
+}
+
 pub type RESPResult<T> = Result<T, RESPError>;
+
+pub type RESPLength = i32;

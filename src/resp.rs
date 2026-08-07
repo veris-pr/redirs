@@ -1,4 +1,4 @@
-use crate::resp_result::{RESPError, RESPResult};
+use crate::resp_result::{RESPError, RESPLength, RESPResult};
 use std::fmt;
 
 type RESPFn = fn(&[u8], &mut usize) -> RESPResult<RESP>;
@@ -6,15 +6,54 @@ type RESPFn = fn(&[u8], &mut usize) -> RESPResult<RESP>;
 #[derive(Debug, PartialEq)]
 pub enum RESP {
     SimpleString(String),
+    Null,
+    BulkString(String),
 }
 
 impl fmt::Display for RESP {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let data = match self {
             Self::SimpleString(data) => format!("+{}\r\n", data),
+            Self::Null => "$-1\r\n".to_string(),
+            Self::BulkString(data) => format!("${}\r\n{}\r\n", data.len(), data),
         };
         write!(f, "{}", data)
     }
+}
+
+fn resp_process_type(type_byte: char, buffer: &[u8], index: &mut usize) -> RESPResult<()> {
+    if buffer[*index] != type_byte as u8 {
+        return Err(RESPError::WrongType);
+    }
+    *index += 1;
+    Ok(())
+}
+
+fn parser_router(buffer: &[u8], index: &mut usize) -> Option<RESPFn> {
+    match buffer.get(*index) {
+        Some(&b'+') => Some(resp_parse_simple_string),
+        Some(&b'$') => Some(resp_parse_bulk_string),
+        _ => None,
+    }
+}
+
+pub fn bytes_to_resp(buffer: &[u8], index: &mut usize) -> RESPResult<RESP> {
+    if let Some(parser_fn) = parser_router(buffer, index) {
+        parser_fn(buffer, index)
+    } else {
+        Err(RESPError::Unknown)
+    }
+}
+
+// utils
+fn binary_extract_bytes(buffer: &[u8], index: &mut usize, length: usize) -> RESPResult<Vec<u8>> {
+    let mut output = Vec::new();
+    if *index + length > buffer.len() {
+        return Err(RESPError::OutOfBounds(buffer.len()));
+    }
+    output.extend_from_slice(&buffer[*index..*index + length]);
+    *index += length;
+    Ok(output)
 }
 
 fn binary_extract_line(buffer: &[u8], index: &mut usize) -> RESPResult<Vec<u8>> {
@@ -48,38 +87,37 @@ fn binary_extract_line(buffer: &[u8], index: &mut usize) -> RESPResult<Vec<u8>> 
 fn binary_extract_line_as_string(buffer: &[u8], index: &mut usize) -> RESPResult<String> {
     // Extract all possible bytes updating the index.
     let line = binary_extract_line(buffer, index)?;
-
     // Convert the bytes to a UTF-8 String.
     Ok(String::from_utf8(line)?)
 }
 
-fn resp_process_type(type_byte: char, buffer: &[u8], index: &mut usize) -> RESPResult<()> {
-    if buffer[*index] != type_byte as u8 {
-        return Err(RESPError::WrongType);
-    }
-    *index += 1;
-    Ok(())
-}
-
+// simple string
 fn resp_parse_simple_string(buffer: &[u8], index: &mut usize) -> RESPResult<RESP> {
     resp_process_type('+', buffer, index)?;
     let line: String = binary_extract_line_as_string(buffer, index)?;
     Ok(RESP::SimpleString(line))
 }
 
-fn parser_router(buffer: &[u8], index: &mut usize) -> Option<RESPFn> {
-    match buffer.get(*index) {
-        Some(&b'+') => Some(resp_parse_simple_string),
-        _ => None,
-    }
+// bulk string
+fn resp_extract_length(buffer: &[u8], index: &mut usize) -> RESPResult<RESPLength> {
+    let line = binary_extract_line_as_string(buffer, index)?;
+    let len: RESPLength = line.parse()?;
+    Ok(len)
 }
 
-pub fn resp_parser(buffer: &[u8], index: &mut usize) -> RESPResult<RESP> {
-    if let Some(parser_fn) = parser_router(buffer, index) {
-        parser_fn(buffer, index)
-    } else {
-        Err(RESPError::Unknown)
+fn resp_parse_bulk_string(buffer: &[u8], index: &mut usize) -> RESPResult<RESP> {
+    resp_process_type('$', buffer, index)?;
+    let len = resp_extract_length(buffer, index)?;
+    if len == -1 {
+        return Ok(RESP::Null);
     }
+    if len < -1 {
+        return Err(RESPError::IncorrectLength(len));
+    }
+    let bytes = binary_extract_bytes(buffer, index, len as usize)?;
+    let data: String = String::from_utf8(bytes)?;
+    *index += 2;
+    Ok(RESP::BulkString(data))
 }
 
 #[cfg(test)]
@@ -231,7 +269,7 @@ mod tests {
         let buffer = b"+OK\r\n";
         let mut index: usize = 0;
 
-        let s = resp_parser(buffer, &mut index).unwrap();
+        let s = bytes_to_resp(buffer, &mut index).unwrap();
         assert_eq!(s, RESP::SimpleString(String::from("OK")));
         assert_eq!(index, 5);
     }
@@ -241,7 +279,73 @@ mod tests {
         let buffer = b"-Error\r\n";
         let mut index: usize = 0;
 
-        let result = resp_parser(buffer, &mut index);
+        let result = bytes_to_resp(buffer, &mut index);
         assert!(matches!(result, Err(RESPError::Unknown)));
+    }
+
+    #[test]
+    fn test_parse_bulk_string() {
+        let buffer = "$2\r\nOK\r\n".as_bytes();
+        let mut index: usize = 0;
+
+        let output = resp_parse_bulk_string(buffer, &mut index).unwrap();
+
+        assert_eq!(output, RESP::BulkString(String::from("OK")));
+        assert_eq!(index, 8);
+    }
+
+    #[test]
+    fn test_parse_bulk_string_empty() {
+        let buffer = "$-1\r\n".as_bytes();
+        let mut index: usize = 0;
+
+        let output = resp_parse_bulk_string(buffer, &mut index).unwrap();
+
+        assert_eq!(output, RESP::Null);
+        assert_eq!(index, 5);
+    }
+
+    #[test]
+    fn test_parse_bulk_string_unparsable_length() {
+        let buffer = "$wrong\r\nOK\r\n".as_bytes();
+        let mut index: usize = 0;
+
+        let error = resp_parse_bulk_string(buffer, &mut index).unwrap_err();
+
+        assert_eq!(error, RESPError::ParseInt);
+        assert_eq!(index, 8);
+    }
+
+    #[test]
+    fn test_parse_bulk_string_negative_length() {
+        let buffer = "$-7\r\nOK\r\n".as_bytes();
+        let mut index: usize = 0;
+
+        let error = resp_parse_bulk_string(buffer, &mut index).unwrap_err();
+
+        assert_eq!(error, RESPError::IncorrectLength(-7));
+        assert_eq!(index, 5);
+    }
+
+    #[test]
+    fn test_parse_bulk_string_data_too_short() {
+        let buffer = "$7\r\nOK\r\n".as_bytes();
+        let mut index: usize = 0;
+
+        let error = resp_parse_bulk_string(buffer, &mut index).unwrap_err();
+
+        assert_eq!(error, RESPError::OutOfBounds(8));
+        assert_eq!(index, 4);
+    }
+
+    #[test]
+    fn test_bytes_to_resp_bulk_string() {
+        let buffer = "$2\r\nOK\r\n".as_bytes();
+        let mut index: usize = 0;
+
+        let output = bytes_to_resp(buffer, &mut index).unwrap();
+
+        assert_eq!(output, RESP::BulkString(String::from("OK")));
+        assert_eq!(index, 8);
     }
 }
