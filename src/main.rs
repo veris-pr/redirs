@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -5,10 +7,13 @@ use tokio::{
 
 use crate::resp::{RESP, bytes_to_resp};
 use crate::server::process_request;
+use crate::storage::Storage;
 
 mod resp;
 mod resp_result;
 mod server;
+mod storage;
+mod storage_result;
 
 const BUFFER_SIZE: usize = 512;
 const ADDRESS: &str = "127.0.0.1";
@@ -17,10 +22,11 @@ const PORT: u16 = 6379;
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind(format!("{}:{}", ADDRESS, PORT)).await?;
+    let storage = Arc::new(Mutex::new(Storage::new()));
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(handle_stream(stream));
+                tokio::spawn(handle_stream(stream, storage.clone()));
             }
             Err(e) => {
                 eprintln!("Error accepting connection: {}", e);
@@ -30,7 +36,7 @@ async fn main() -> std::io::Result<()> {
     }
 }
 
-async fn handle_stream(mut stream: TcpStream) {
+async fn handle_stream(mut stream: TcpStream, storage: Arc<Mutex<Storage>>) {
     let mut buffer = [0; BUFFER_SIZE];
     loop {
         // stream.read(&mut buffer).unwrap();
@@ -48,7 +54,7 @@ async fn handle_stream(mut stream: TcpStream) {
                         return;
                     }
                 };
-                let response = match process_request(request) {
+                let response = match process_request(request, storage.clone()) {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("Error parsing command: {}", e);
