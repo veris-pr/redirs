@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use crate::resp::RESP;
 use crate::storage::Storage;
 
+mod commands;
 mod connection;
 mod request;
 mod resp;

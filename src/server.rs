@@ -1,11 +1,10 @@
-use std::time::Duration;
-
-use tokio::sync::mpsc;
-
+use crate::commands::{echo, get, ping, set};
 use crate::connection::ConnectionMessage;
 use crate::request::Request;
-use crate::server_result::{ServerError, ServerValue};
+use crate::server_result::ServerError;
 use crate::{RESP, storage::Storage};
+use std::time::Duration;
+use tokio::sync::mpsc;
 
 pub struct Server {
     pub storage: Option<Storage>,
@@ -68,26 +67,33 @@ pub async fn process_request(request: Request, server: &mut Server) {
             }
         }
     }
-    let storage = match server.storage.as_mut() {
-        Some(storage) => storage,
-        None => {
-            request.error(ServerError::StorageNotInitialised).await;
-            return;
-        }
-    };
+    let command_name = command[0].to_lowercase();
 
-    let response = storage.process_command(&command);
-    match response {
-        Ok(v) => {
-            request.data(ServerValue::RESP(v)).await;
+    // Process the request using the requested command.
+    match command_name.as_str() {
+        "echo" => {
+            echo::command(server, &request, &command).await;
         }
-        Err(_e) => (),
+        "get" => {
+            get::command(server, &request, &command).await;
+        }
+        "ping" => {
+            ping::command(server, &request, &command).await;
+        }
+        "set" => {
+            set::command(server, &request, &command).await;
+        }
+        _ => {
+            request
+                .error(ServerError::CommandNotAvailable(command[0].clone()))
+                .await;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::server_result::ServerMessage;
+    use crate::server_result::{ServerMessage, ServerValue};
 
     use super::*;
 
