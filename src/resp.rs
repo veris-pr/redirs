@@ -9,6 +9,7 @@ pub enum RESP {
     SimpleString(String),
     Null,
     BulkString(String),
+    RDBPrefix(usize),
 }
 
 impl fmt::Display for RESP {
@@ -25,6 +26,7 @@ impl fmt::Display for RESP {
             Self::SimpleString(data) => format!("+{}\r\n", data),
             Self::Null => "$-1\r\n".to_string(),
             Self::BulkString(data) => format!("${}\r\n{}\r\n", data.len(), data),
+            Self::RDBPrefix(data) => format!("${}\r\n", data.to_string()),
         };
         write!(f, "{}", data)
     }
@@ -56,6 +58,10 @@ pub fn bytes_to_resp(buffer: &[u8], index: &mut usize) -> RESPResult<RESP> {
 }
 
 // utils
+pub fn bulk_string_from_vec(strings: Vec<String>) -> RESP {
+    RESP::BulkString(strings.join("\r\n"))
+}
+
 fn binary_extract_bytes(buffer: &[u8], index: &mut usize, length: usize) -> RESPResult<Vec<u8>> {
     let mut output = Vec::new();
     if *index + length > buffer.len() {

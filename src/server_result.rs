@@ -8,6 +8,7 @@ pub enum ServerError {
     CommandNotAvailable(String),
     IncorrectData,
     StorageNotInitialised,
+    HandshakeFailed(String),
 }
 
 impl fmt::Display for ServerError {
@@ -29,13 +30,18 @@ impl fmt::Display for ServerError {
             ServerError::CommandNotAvailable(string) => {
                 write!(f, "Command {} is not available.", string)
             }
+            ServerError::HandshakeFailed(string) => {
+                write!(f, "Handshake failed: {}.", string)
+            }
         }
     }
 }
 
 #[derive(Debug, PartialEq)]
 pub enum ServerValue {
+    None,
     RESP(RESP),
+    Binary(Vec<u8>),
 }
 
 #[derive(Debug, PartialEq)]
