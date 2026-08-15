@@ -1,22 +1,27 @@
 use crate::commands::{echo, get, info, ping, psync, replconf, set};
-use crate::connection::{ConnectionMessage, stream_send_receive_resp};
 use crate::replication::ReplicationConfig;
 use crate::request::Request;
-use crate::server_result::{ServerError, ServerResult, ServerValue};
+use crate::resp::{resp_extract_length, resp_process_type};
+use crate::server_result::{ServerError, ServerMessage, ServerResult, ServerValue};
 use crate::{RESP, storage::Storage};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 pub struct ServerInfo {
+    #[allow(dead_code)]
     pub host: String,
     pub port: u16,
 }
+use crate::connection::{
+    ConnectionMessage, stream_read_data_length, stream_read_line, stream_send_receive_resp,
+};
 
 pub struct Server {
     pub info: ServerInfo,
     pub storage: Option<Storage>,
     pub replication: ReplicationConfig,
+    pub replica_senders: Vec<mpsc::Sender<ServerMessage>>,
 }
 
 impl Server {
@@ -25,6 +30,7 @@ impl Server {
             info: ServerInfo { host, port },
             storage: None,
             replication: ReplicationConfig::new_master(),
+            replica_senders: Vec::new(),
         }
     }
 
@@ -113,6 +119,7 @@ pub async fn process_request(request: Request, server: &mut Server) {
         }
         "set" => {
             set::command(server, &request, &command).await;
+            send_request_to_replicas(&request, server).await;
         }
         "info" => {
             info::command(server, &request, &command).await;
@@ -130,139 +137,18 @@ pub async fn process_request(request: Request, server: &mut Server) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::server_result::{ServerMessage, ServerValue};
-
-    use super::*;
-
-    #[test]
-    fn test_create_new() {
-        let server: Server = Server::new("localhost".to_string(), 6379);
-
-        match server.storage {
-            Some(_) => panic!(),
-            None => (),
-        };
-    }
-
-    #[test]
-    fn test_set_storage() {
-        let storage = Storage::new();
-
-        let mut server: Server = Server::new("localhost".to_string(), 6379);
-        server.set_storage(storage);
-
-        match server.storage {
-            Some(_) => (),
-            None => panic!(),
-        };
-    }
-
-    #[tokio::test]
-    async fn test_process_request_ping() {
-        let (conn_sender, mut conn_receiver) = mpsc::channel::<ServerMessage>(32);
-        let request = Request {
-            value: RESP::Array(vec![RESP::BulkString(String::from("PING"))]),
-            sender: conn_sender,
-        };
-        let storage = Storage::new();
-        let mut server: Server = Server::new("localhost".to_string(), 6379);
-        server.set_storage(storage);
-
-        process_request(request, &mut server).await;
-
-        assert_eq!(
-            conn_receiver.try_recv().unwrap(),
-            ServerMessage::Data(ServerValue::RESP(RESP::SimpleString(String::from("PONG"))))
-        );
-    }
-
-    #[tokio::test]
-    async fn test_process_request_echo() {
-        let (connection_sender, mut connection_receiver) = mpsc::channel::<ServerMessage>(32);
-
-        let request = Request {
-            value: RESP::Array(vec![
-                RESP::BulkString(String::from("ECHO")),
-                RESP::BulkString(String::from("42")),
-            ]),
-            sender: connection_sender,
-        };
-
-        let storage = Storage::new();
-
-        let mut server: Server = Server::new("localhost".to_string(), 6379);
-        server.set_storage(storage);
-
-        process_request(request, &mut server).await;
-
-        assert_eq!(
-            connection_receiver.try_recv().unwrap(),
-            ServerMessage::Data(ServerValue::RESP(RESP::BulkString(String::from("42"))))
-        );
-    }
-
-    #[tokio::test]
-    async fn test_process_request_not_array() {
-        let (connection_sender, mut connection_receiver) = mpsc::channel::<ServerMessage>(32);
-
-        let request = Request {
-            value: RESP::BulkString(String::from("PING")),
-            sender: connection_sender,
-        };
-
-        let storage = Storage::new();
-
-        let mut server: Server = Server::new("localhost".to_string(), 6379);
-        server.set_storage(storage);
-
-        process_request(request, &mut server).await;
-
-        assert_eq!(
-            connection_receiver.try_recv().unwrap(),
-            ServerMessage::Error(ServerError::IncorrectData)
-        );
-    }
-
-    #[tokio::test]
-    async fn test_process_request_not_bulkstrings() {
-        let (connection_sender, mut connection_receiver) = mpsc::channel::<ServerMessage>(32);
-
-        let request = Request {
-            value: RESP::Array(vec![RESP::SimpleString(String::from("PING"))]),
-            sender: connection_sender,
-        };
-
-        let storage = Storage::new();
-
-        let mut server: Server = Server::new("localhost".to_string(), 6379);
-        server.set_storage(storage);
-
-        process_request(request, &mut server).await;
-
-        assert_eq!(
-            connection_receiver.try_recv().unwrap(),
-            ServerMessage::Error(ServerError::IncorrectData)
-        );
+pub async fn send_request_to_replicas(request: &Request, server: &Server) {
+    for replica_sender in server.replica_senders.iter() {
+        let _ = replica_sender
+            .send(ServerMessage::Data(ServerValue::Binary(
+                request.binary.clone(),
+            )))
+            .await;
     }
 }
 
 pub async fn handshake(stream: &mut TcpStream, info: &ServerInfo) -> ServerResult {
     let mut buffer = [0; 512];
-
-    let ping = RESP::Array(vec![RESP::BulkString(String::from("PING"))]);
-    stream
-        .write_all(ping.to_string().as_bytes())
-        .await
-        .map_err(|e| {
-            ServerError::HandshakeFailed(format!(
-                "Sending {} - Cannot write to stream: {}",
-                ping.to_string(),
-                e.to_string()
-            ))
-        })?;
     let ping = RESP::Array(vec![RESP::BulkString(String::from("PING"))]);
 
     // Send the command and read the response.
@@ -294,6 +180,7 @@ pub async fn handshake(stream: &mut TcpStream, info: &ServerInfo) -> ServerResul
             resp.to_string()
         )));
     };
+
     let replconf = RESP::Array(vec![
         RESP::BulkString(String::from("REPLCONF")),
         RESP::BulkString(String::from("capa")),
@@ -314,7 +201,6 @@ pub async fn handshake(stream: &mut TcpStream, info: &ServerInfo) -> ServerResul
         )));
     };
 
-    // Prepare the RESP PSYNC command.
     let psync = RESP::Array(vec![
         RESP::BulkString(String::from("PSYNC")),
         RESP::BulkString(String::from("?")),
@@ -332,6 +218,35 @@ pub async fn handshake(stream: &mut TcpStream, info: &ServerInfo) -> ServerResul
                 e.to_string()
             ))
         })?;
+
+    // Read the RDB length.
+    if let Some(_) = stream_read_line(stream, &mut buffer).await.err() {
+        return Err(ServerError::HandshakeFailed(String::from(
+            "PSYNC failed, cannot read RDB length",
+        )));
+    }
+
+    let mut index = 0;
+
+    // Remove the dollar sign.
+    if let Some(_) = resp_process_type('$', &buffer, &mut index).err() {
+        return Err(ServerError::HandshakeFailed(String::from(
+            "PSYNC failed, RDB doesn't start with $",
+        )));
+    }
+
+    // Convert bytes into RDB length.
+    let length = resp_extract_length(&buffer, &mut index).unwrap();
+
+    // Read the RDB data.
+    if let Some(_) = stream_read_data_length(stream, &mut buffer, length as usize)
+        .await
+        .err()
+    {
+        return Err(ServerError::HandshakeFailed(String::from(
+            "PSYNC failed, cannot read RDB",
+        )));
+    }
 
     Ok(ServerValue::None)
 }

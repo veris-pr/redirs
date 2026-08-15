@@ -13,6 +13,7 @@ pub enum StorageValue {
 #[derive(Debug)]
 pub struct StorageData {
     pub value: StorageValue,
+    #[allow(dead_code)]
     pub creation_time: SystemTime,
     pub expiry: Option<Duration>,
 }

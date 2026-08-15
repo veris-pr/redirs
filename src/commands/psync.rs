@@ -27,4 +27,6 @@ pub async fn command(server: &mut Server, request: &Request, _command: &Vec<Stri
 
     // Send the RDB data.
     request.data(ServerValue::Binary(rdb)).await;
+
+    server.replica_senders.push(request.sender.clone());
 }

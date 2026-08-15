@@ -32,7 +32,7 @@ impl fmt::Display for RESP {
     }
 }
 
-fn resp_process_type(type_byte: char, buffer: &[u8], index: &mut usize) -> RESPResult<()> {
+pub fn resp_process_type(type_byte: char, buffer: &[u8], index: &mut usize) -> RESPResult<()> {
     if buffer[*index] != type_byte as u8 {
         return Err(RESPError::WrongType);
     }
@@ -115,7 +115,7 @@ fn resp_parse_simple_string(buffer: &[u8], index: &mut usize) -> RESPResult<RESP
 }
 
 // bulk string
-fn resp_extract_length(buffer: &[u8], index: &mut usize) -> RESPResult<RESPLength> {
+pub fn resp_extract_length(buffer: &[u8], index: &mut usize) -> RESPResult<RESPLength> {
     let line = binary_extract_line_as_string(buffer, index)?;
     let len: RESPLength = line.parse()?;
     Ok(len)

@@ -137,27 +137,29 @@ async fn handle_connection(mut stream: TcpStream, server_sender: mpsc::Sender<Co
                         // Initialise the index to start at the
                         // beginning of the buffer.
                         let mut index: usize = 0;
+                            while index < size {
+                            // Process the bytes in the buffer according to
+                            // the content and extract the request. Update the index.
+                            let resp = match bytes_to_resp(&buffer[..size].to_vec(), &mut index) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    eprintln!("Error: {}", e);
+                                    return;
+                                }
+                            };
 
-                        // Process the bytes in the buffer according to
-                        // the content and extract the request. Update the index.
-                        let resp = match bytes_to_resp(&buffer[..size].to_vec(), &mut index) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                eprintln!("Error: {}", e);
-                                return;
-                            }
-                        };
+                            let request = Request {
+                                value: resp,
+                                sender: connection_sender.clone(),
+                                binary: buffer[..size].to_vec(),
+                            };
 
-                        let request = Request {
-                            value: resp,
-                            sender: connection_sender.clone(),
-                        };
-
-                        match server_sender.send(ConnectionMessage::Request(request)).await {
-                            Ok(()) => {},
-                            Err(r) => {
-                                eprintln!("Error sending request to server: {}", r);
-                                return;
+                            match server_sender.send(ConnectionMessage::Request(request)).await {
+                                Ok(()) => {},
+                                Err(r) => {
+                                    eprintln!("Error sending request to server: {}", r);
+                                    return;
+                                }
                             }
                         }
                     }
@@ -203,4 +205,58 @@ pub async fn run_master_listener(
         std::process::exit(1);
     }
     tokio::spawn(async move { handle_connection(stream, server_sender.clone()).await });
+}
+
+pub async fn stream_read_line(
+    stream: &mut TcpStream,
+    buffer: &mut [u8],
+) -> ConnectionResult<usize> {
+    let mut byte = [0; 1];
+    let mut index = 0;
+
+    // Keep reading every byte until we issue a break.
+    loop {
+        // Read one byte.
+        stream
+            .read_exact(&mut byte)
+            .await
+            .map_err(|e| ConnectionError::CannotReadFromStream(e.to_string()))?;
+
+        // Store the byte in the buffer.
+        buffer[index] = byte[0];
+
+        // Check if we reached the end of the line.
+        if buffer[index] == b'\n' && buffer[index - 1] == b'\r' {
+            break;
+        }
+
+        index += 1;
+    }
+
+    Ok(index)
+}
+
+pub async fn stream_read_data_length(
+    stream: &mut TcpStream,
+    buffer: &mut [u8],
+    length: usize,
+) -> ConnectionResult<usize> {
+    let mut byte = [0; 1];
+    let mut index = 0;
+
+    // Keep reading every byte until we reach the given amount.
+    while index < length {
+        // Read one byte.
+        stream
+            .read_exact(&mut byte)
+            .await
+            .map_err(|e| ConnectionError::CannotReadFromStream(e.to_string()))?;
+
+        // Store the byte in the buffer.
+        buffer[index] = byte[0];
+
+        index += 1;
+    }
+
+    Ok(index)
 }
